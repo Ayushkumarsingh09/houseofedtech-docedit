@@ -93,6 +93,27 @@ operations), and cleanup after a confirmed sync.
 primitive components (which are near-verbatim shadcn/ui output with no
 custom logic to test) — see `vitest.config.ts`.
 
+Overall repo-wide statement coverage from Vitest alone is intentionally
+modest (~23%) — **and that number is misleading in isolation.** Coverage is
+concentrated exactly where the assignment says it matters most ("coverage
+and effectiveness ... specifically around the local-first sync engine"):
+
+| File | Statement coverage |
+| --- | --- |
+| `lib/sync-engine/diff-to-operations.ts` | 96% |
+| `lib/sync-engine/conflict-resolver.ts` | 85% |
+| `lib/sync-engine/operation-queue.ts` | 83% |
+| `services/sync.service.ts` | 77% |
+| `validators/validate-request.ts` | 94% |
+
+Route handlers, simpler CRUD services (`document.service.ts`,
+`collaborator.service.ts`, `version.service.ts`), and React components are
+instead exercised through the **Playwright end-to-end suite**, which runs
+against a separately-built production server and therefore isn't captured
+by Vitest's v8 instrumentation — a deliberate trade-off (testing real
+HTTP + real browser behavior) rather than a gap, but one worth being
+transparent about rather than presenting an inflated blended number.
+
 ## CI
 
 All three layers run on every push/PR via `.github/workflows/ci.yml`:

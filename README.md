@@ -185,7 +185,19 @@ concurrent-edit scenarios against a live Postgres database and asserts the
 merge is deterministic and lossless; the e2e suite includes a real
 `context.setOffline(true)` simulation of editing without a network.
 
+Coverage is concentrated on the sync engine itself (85–96% statement
+coverage on the conflict resolver, diff engine, and outbox) rather than
+spread thin — see [`docs/TESTING.md#coverage`](docs/TESTING.md#coverage)
+for the honest, unrounded breakdown.
+
 ## Performance
+
+Lighthouse (production, mobile emulation) — full report:
+[`docs/lighthouse-report.html`](docs/lighthouse-report.html)
+
+| Performance | Accessibility | Best Practices | SEO |
+| :---: | :---: | :---: | :---: |
+| 98 | 100 | 100 | 100 |
 
 - Route-level code splitting (App Router); heavy editor extensions and AI
   provider SDKs are dynamically imported only when used.
@@ -193,6 +205,9 @@ merge is deterministic and lossless; the e2e suite includes a real
   document size — the editor itself is never blocked by sync work.
 - Optimistic UI everywhere (create, rename, type) — the network is always
   a background concern.
+- Auth-state hydration is scoped to the authenticated app shell only, so
+  public pages (landing, login, signup) never make an unnecessary
+  `/api/auth/me` request.
 - `next/font` self-hosted fonts, security headers configured for caching,
   Tailwind's JIT engine ships only the CSS actually used.
 
