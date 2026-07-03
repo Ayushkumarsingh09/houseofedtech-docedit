@@ -1,0 +1,282 @@
+// Nimbus Docs — Database Schema
+// Prisma schema for a local-first, offline-sync collaborative document editor.
+//
+// Design principles:
+// - Every mutable aggregate (`Document`) carries an integer `version` used for
+//   optimistic locking: writes must supply the version they read, and are
+//   rejected (409) if it has since advanced — the sync engine then resolves
+//   the conflict deterministically and retries.
+// - `Operation` is an immutable, append-only log of every accepted edit. It is
+//   the audit trail that the merge engine and conflict resolver rely on, and
+//   the source of truth for replay / debugging.
+// - `Snapshot` + `Version` implement Git-like history: `Snapshot` stores an
+//   immutable content blob, `Version` is the pointer/metadata (label, author,
+//   diff stats) that makes a snapshot addressable in a timeline.
+// - Tenant isolation is enforced at the ORM layer (every query is scoped by
+//   the authenticated user's accessible document IDs — see
+//   `src/repositories`) and reinforced with foreign keys + indexes here.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = []
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  OWNER
+  EDITOR
+  VIEWER
+}
+
+enum OperationType {
+  INSERT
+  DELETE
+  REPLACE
+  RENAME
+  SET_CONTENT
+}
+
+enum OperationStatus {
+  APPLIED
+  REJECTED
+  CONFLICT_RESOLVED
+}
+
+enum Theme {
+  LIGHT
+  DARK
+  SYSTEM
+}
+
+enum NotificationType {
+  COLLABORATOR_ADDED
+  DOCUMENT_SHARED
+  VERSION_RESTORED
+  MENTION
+  SYSTEM
+}
+
+// ---------------------------------------------------------------------------
+// Core identity
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  avatarColor  String   @default("#6366F1")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  ownedDocuments Document[]     @relation("OwnedDocuments")
+  collaborations Collaborator[]
+  sessions       Session[]
+  auditLogs      AuditLog[]
+  notifications  Notification[]
+  settings       Settings?
+  versions       Version[]
+  operations     Operation[]
+
+  @@map("users")
+}
+
+model Session {
+  id               String    @id @default(cuid())
+  userId           String
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshTokenHash String    @unique
+  userAgent        String?
+  ipAddress        String?
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  createdAt        DateTime  @default(now())
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model Settings {
+  id                 String   @id @default(cuid())
+  userId             String   @unique
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  theme              Theme    @default(SYSTEM)
+  editorFontSize     Int      @default(16)
+  autoSaveIntervalMs Int      @default(800)
+  emailNotifications Boolean  @default(true)
+  updatedAt          DateTime @updatedAt
+
+  @@map("settings")
+}
+
+// ---------------------------------------------------------------------------
+// Documents & collaboration
+// ---------------------------------------------------------------------------
+
+model Document {
+  id          String   @id @default(cuid())
+  title       String
+  ownerId     String
+  owner       User     @relation("OwnedDocuments", fields: [ownerId], references: [id])
+  content     String   @default("") @db.Text
+  contentJson Json?
+  /// Optimistic-locking counter. Incremented atomically on every accepted
+  /// mutation. Sync payloads must include the `baseVersion` they branched
+  /// from; mismatches trigger the conflict-resolution path.
+  version     Int      @default(0)
+  isArchived  Boolean  @default(false)
+  isDeleted   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  collaborators Collaborator[]
+  versions      Version[]
+  snapshots     Snapshot[]
+  operations    Operation[]
+  auditLogs     AuditLog[]
+  notifications Notification[]
+
+  @@index([ownerId])
+  @@index([updatedAt])
+  @@map("documents")
+}
+
+model Collaborator {
+  id         String   @id @default(cuid())
+  documentId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role       Role     @default(VIEWER)
+  invitedAt  DateTime @default(now())
+
+  @@unique([documentId, userId])
+  @@index([userId])
+  @@map("collaborators")
+}
+
+// ---------------------------------------------------------------------------
+// Version history (Git-like snapshots)
+// ---------------------------------------------------------------------------
+
+model Snapshot {
+  id          String   @id @default(cuid())
+  documentId  String
+  document    Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  content     String   @db.Text
+  contentJson Json?
+  /// SHA-256 of `content`, used for integrity checks and de-duplication.
+  hash        String
+  sizeBytes   Int
+  createdAt   DateTime @default(now())
+
+  version Version?
+
+  @@index([documentId])
+  @@index([hash])
+  @@map("snapshots")
+}
+
+model Version {
+  id                String   @id @default(cuid())
+  documentId        String
+  document          Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  createdById       String
+  createdBy         User     @relation(fields: [createdById], references: [id])
+  label             String?
+  /// Monotonic per-document counter (1, 2, 3, …) — independent from
+  /// `Document.version` which tracks the live optimistic-lock counter.
+  versionNumber     Int
+  contentSnapshotId String   @unique
+  snapshot          Snapshot @relation(fields: [contentSnapshotId], references: [id])
+  changesSummary    Json?
+  isAutomatic       Boolean  @default(true)
+  createdAt         DateTime @default(now())
+
+  @@unique([documentId, versionNumber])
+  @@index([documentId])
+  @@map("versions")
+}
+
+// ---------------------------------------------------------------------------
+// Sync engine operation log
+// ---------------------------------------------------------------------------
+
+model Operation {
+  id         String   @id @default(cuid())
+  /// Client-generated UUID. The unique index makes replays of the same
+  /// operation (e.g. after a retried request) fully idempotent server-side.
+  operationId String  @unique
+  clientId    String
+  documentId  String
+  document    Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+
+  type   OperationType
+  payload Json
+
+  baseVersion    Int
+  resultVersion  Int?
+  /// Per-(client, document) monotonic counter used to detect gaps /
+  /// out-of-order delivery and to deduplicate retried batches.
+  sequenceNumber Int
+
+  clientTimestamp DateTime
+  serverTimestamp DateTime @default(now())
+  hash            String
+
+  status             OperationStatus @default(APPLIED)
+  conflictResolution Json?
+
+  @@unique([clientId, documentId, sequenceNumber])
+  @@index([documentId, resultVersion])
+  @@index([userId])
+  @@map("operations")
+}
+
+// ---------------------------------------------------------------------------
+// Observability
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id         String    @id @default(cuid())
+  userId     String?
+  user       User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  documentId String?
+  document   Document? @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  action     String
+  metadata   Json?
+  ipAddress  String?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
+  @@index([documentId])
+  @@index([action])
+  @@map("audit_logs")
+}
+
+model Notification {
+  id         String           @id @default(cuid())
+  userId     String
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type       NotificationType
+  title      String
+  body       String?
+  documentId String?
+  document   Document?        @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  isRead     Boolean          @default(false)
+  createdAt  DateTime         @default(now())
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
