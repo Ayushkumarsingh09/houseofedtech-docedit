@@ -1,0 +1,12 @@
+{
+  "name": "Nimbus Docs",
+  "short_name": "Nimbus Docs",
+  "description": "A local-first, offline-capable collaborative document editor with deterministic conflict resolution and Git-like version history.",
+  "start_url": "/dashboard",
+  "display": "standalone",
+  "background_color": "#fdfdfd",
+  "theme_color": "#4F46E5",
+  "icons": [
+    { "src": "/icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
